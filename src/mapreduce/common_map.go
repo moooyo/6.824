@@ -2,6 +2,7 @@ package mapreduce
 
 import (
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
@@ -57,6 +58,7 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+	fmt.Printf("income map function\n")
 	file, err := os.Open(inFile)
 	defer file.Close()
 	if err != nil {
@@ -66,7 +68,7 @@ func doMap(
 	if err != nil {
 		log.Fatal(err)
 	}
-	intermediate := mapF("nil", string(data))
+	intermediate := mapF(inFile, string(data))
 	outFile := make([](*os.File), nReduce)
 	defer func() {
 		for _, value := range outFile {
@@ -93,7 +95,7 @@ func doMap(
 		temp.Values = values
 		hashKey := ihash(temp.Key) % nReduce
 		encoder := json.NewEncoder(outFile[hashKey])
-		err = encoder.Encode(temp)
+		err = encoder.Encode(&temp)
 		if err != nil {
 			log.Fatal(err)
 		}

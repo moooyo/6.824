@@ -1,5 +1,13 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"sort"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +52,64 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	fmt.Printf("income reduce function\n")
+
+	keyMap := make(map[string]*Intermediate)
+	var KeyList []string
+	var kvTemp Intermediate
+	for i := 0; i < nMap; i = i + 1 {
+		filename := reduceName(jobName, i, reduceTask)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		decoder := json.NewDecoder(file)
+		for decoder.More() {
+			err = decoder.Decode(&kvTemp)
+			if err != nil {
+				file.Close()
+				fmt.Printf("intermediate decoder error\n")
+				log.Fatal(err)
+			}
+			if keyMap[kvTemp.Key] == nil {
+				KeyList = append(KeyList, kvTemp.Key)
+				keyMap[kvTemp.Key] = new(Intermediate)
+				keyMap[kvTemp.Key].Key = kvTemp.Key
+			}
+			for _, str := range kvTemp.Values {
+				keyMap[kvTemp.Key].Values = append(keyMap[kvTemp.Key].Values, str)
+			}
+		}
+
+		file.Close()
+	}
+
+	sort.Strings(KeyList)
+
+	file, err := os.Create(outFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+
+	for _, str := range KeyList {
+		var tmp *Intermediate
+		var writeTmp KeyValue
+
+		tmp = keyMap[str]
+		if tmp == nil {
+			continue
+		}
+		ret := reduceF(tmp.Key, tmp.Values)
+
+		writeTmp.Key = tmp.Key
+		writeTmp.Value = ret
+		err = encoder.Encode(writeTmp)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 }
