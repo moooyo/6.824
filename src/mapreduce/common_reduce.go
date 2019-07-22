@@ -52,7 +52,6 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
-	fmt.Printf("income reduce function\n")
 
 	keyMap := make(map[string]*Intermediate)
 	var KeyList []string
