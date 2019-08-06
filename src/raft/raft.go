@@ -46,7 +46,7 @@ type ApplyMsg struct {
 }
 
 func __LOG(str string) {
-	fmt.Println("[INFO]" + str)
+	//fmt.Println("[INFO]" + str)
 }
 
 func (rf *Raft) INFO_LOG(str string) {
@@ -179,12 +179,16 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer func() {
+		rf.INFO_LOG(fmt.Sprintf("vote to %d %t", args.CandidateID, reply.VoteGranted))
+	}()
 	rf.INFO_LOG(fmt.Sprintf("recive vote request from %d", args.CandidateID))
 
 	if args.Term < rf.currentTerm {
 		// vote false
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.INFO_LOG(fmt.Sprintf("vote to %d false, because args.Term is %d", args.CandidateID, rf.currentTerm))
 		rf.mu.Unlock()
 		return
 	}
@@ -196,6 +200,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		args.LastLogIndex < lastLogIndex) {
 		//vote false
 		reply.Term = rf.currentTerm
+		rf.INFO_LOG(fmt.Sprintf("vote to %d false", args.CandidateID))
 		reply.VoteGranted = false
 		rf.mu.Unlock()
 		return
@@ -203,17 +208,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// if is a new term. vote
 	if args.Term > rf.currentTerm {
-		rf.INFO_LOG(fmt.Sprintf("vote for %d", args.CandidateID))
+		rf.INFO_LOG(fmt.Sprintf("vote for %d args.term %d", args.CandidateID, args.Term))
 		reply.Term = args.Term
 		reply.VoteGranted = true
 		rf.currentTerm = args.Term
 		rf.voteFor = args.CandidateID
+		rf.identity = Follower
 		rf.mu.Unlock()
 		return
 	}
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
+	rf.INFO_LOG(fmt.Sprintf("vote to %d false, because args.Term is %d !", args.CandidateID, rf.currentTerm))
 	rf.mu.Unlock()
 
 	return
@@ -289,9 +296,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.INFO_LOG(fmt.Sprintf("leader changed. new leader is %d", args.LeaderID))
 	}
 	rf.leaderID = args.LeaderID
-	rf.INFO_LOG(fmt.Sprintf("args.Term is %d", args.Term))
 	rf.currentTerm = args.Term
 	rf.identity = Follower
+	//rf.INFO_LOG(fmt.Sprintf("args.Term is %d", args.Term))
 
 	// todo
 	// implement other function
@@ -330,20 +337,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 const (
 	HeartBeatsInterval         = 100
 	ElectTimeOutInterval       = 150
-	ElectTimeOutSleepTimeStart = 450
+	ElectTimeOutSleepTimeStart = 300
 )
 
 func RaftElectMain(rf *Raft) {
-	defer func() {
-		rf.mu.Lock()
-		rf.INFO_LOG("")
-		rf.mu.Unlock()
-	}()
 	for {
 		time.Sleep(time.Millisecond *
 			time.Duration(ElectTimeOutSleepTimeStart+rand.Intn(ElectTimeOutInterval)))
 		rf.mu.Lock()
-		if rf.leaderID != InvalidLeader {
+		if rf.leaderID != InvalidLeader || rf.identity != Follower{
 			rf.INFO_LOG(fmt.Sprintf("leader id = %d", rf.leaderID))
 			rf.identity = Follower
 			rf.voteFor = VoteForNull
@@ -382,26 +384,19 @@ func RaftElectMain(rf *Raft) {
 					accept++
 					lock.Unlock()
 				} else{
-					rf.mu.Lock()
+					if !ok {
+						rf.INFO_LOG(fmt.Sprintf("send request vote to %d but time out", server))
+					} else {
+						rf.INFO_LOG(fmt.Sprintf("send request vote to %d but not got vot", server))
+					}
 					if reply.Term > term {
 						rf.INFO_LOG("elect term out")
-						rf.identity = Follower
-						rf.voteFor = VoteForNull
-						rf.leaderID = InvalidLeader
 					}
-					rf.mu.Unlock()
 				}
 				group.Done()
 			}(index, rf.currentTerm)
 		}
-		if rf.identity == Follower {
-			rf.INFO_LOG("return elect because someone win")
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
 		group.Wait()
-		rf.mu.Lock()
 		if rf.identity == Follower || rf.leaderID != rf.me{
 			rf.INFO_LOG("return elect because someone win")
 			rf.identity = Follower
@@ -410,14 +405,18 @@ func RaftElectMain(rf *Raft) {
 			rf.mu.Unlock()
 			return
 		}
+		rf.INFO_LOG(fmt.Sprintf("accept = %d, want to %d", accept, len(rf.peers)/2))
 		if accept > len(rf.peers)/2 {
-			rf.INFO_LOG("win select become leader")
+			rf.INFO_LOG("win")
 			rf.leaderID = rf.me
 			rf.identity = Leader
 			rf.mu.Unlock()
 			return
 		}
 		rf.INFO_LOG("elect false")
+		rf.identity = Follower
+		rf.voteFor = VoteForNull
+		rf.leaderID = InvalidLeader
 		rf.mu.Unlock()
 	}
 }
@@ -438,10 +437,12 @@ func RaftLeaderMain(rf *Raft) {
 			Entries:      nil,
 			LeaderCommit: 0,
 		}
+		group := sync.WaitGroup{}
 		for index, _ := range rf.peers {
 			if index == rf.me {
 				continue
 			}
+			group.Add(1)
 			go func(server int) {
 				//rf.INFO_LOG(fmt.Sprintf("send heartBeats to %d", server))
 				reply := AppendEntriesReply{
@@ -451,9 +452,11 @@ func RaftLeaderMain(rf *Raft) {
 				_ = rf.sendAppendEntries(server, &args, &reply)
 				//rf.INFO_LOG(fmt.Sprintf("heartBeats ok %t reply.term %d reply.success %t",
 				//	ok, reply.Term, reply.Success))
+				group.Done()
 			}(index)
 		}
 		rf.mu.Unlock()
+		group.Wait()
 		time.Sleep(time.Millisecond * HeartBeatsInterval)
 	}
 }
@@ -461,7 +464,7 @@ func RaftLeaderMain(rf *Raft) {
 func RaftMain(rf *Raft) {
 	for {
 		rf.mu.Lock()
-		rf.INFO_LOG(fmt.Sprintf("identity is %d", rf.identity))
+		//rf.INFO_LOG(fmt.Sprintf("identity is %d", rf.identity))
 		if rf.identity == Follower {
 			lastID := rf.heartBeatsID
 			rf.mu.Unlock()
