@@ -328,8 +328,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 const (
-	HeartBeatsInterval         = 200
-	HeartBeatsTimeOut          = 500
+	HeartBeatsInterval         = 100
 	ElectTimeOutInterval       = 150
 	ElectTimeOutSleepTimeStart = 450
 )
@@ -340,7 +339,6 @@ func RaftElectMain(rf *Raft) {
 		rf.INFO_LOG("")
 		rf.mu.Unlock()
 	}()
-	rand.Seed(time.Now().UnixNano())
 	for {
 		time.Sleep(time.Millisecond *
 			time.Duration(ElectTimeOutSleepTimeStart+rand.Intn(ElectTimeOutInterval)))
@@ -467,7 +465,7 @@ func RaftMain(rf *Raft) {
 		if rf.identity == Follower {
 			lastID := rf.heartBeatsID
 			rf.mu.Unlock()
-			time.Sleep(time.Millisecond * HeartBeatsTimeOut)
+			time.Sleep(time.Millisecond * time.Duration(ElectTimeOutSleepTimeStart + rand.Intn(ElectTimeOutInterval)))
 			rf.mu.Lock()
 			newID := rf.heartBeatsID
 			if lastID == newID {
