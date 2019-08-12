@@ -61,7 +61,7 @@ type LogEntry struct {
 }
 
 const (
-	Closed = -1
+	Closed   = -1
 	Follower = iota
 	Candidate
 	Leader
@@ -210,7 +210,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		args.LastLogIndex < lastLogIndex) {
 		//vote false
 		reply.Term = rf.currentTerm
-		rf.INFO_LOG(fmt.Sprintf("vote to %d false", args.CandidateID))
+		rf.INFO_LOG(fmt.Sprintf("vote to %d false args.lastTerm %d args.lastIndex %d lastTerm %d lastIndex %d",
+			args.CandidateID, args.LastLogTerm, args.LastLogIndex, lastLogTerm, lastLogIndex))
 		reply.VoteGranted = false
 		rf.mu.Unlock()
 		return
@@ -292,58 +293,53 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	if rf.identity == Closed {
-		reply.Success= false
+		reply.Success = false
 		reply.Term = rf.currentTerm
 		rf.mu.Unlock()
 		return
 	}
-	//rf.INFO_LOG(fmt.Sprintf("recive heartBeats from %d", args.LeaderID))
-	// check term
-	// This check is incorrect
+
+	//
+	// correct restrict
+	//
+
+	find := false
+	for i := rf.logIndex; i >= 0; i-- {
+		if args.PreLogTerm == rf.logs[i].Term && args.PreLogIndex == rf.logs[i].Index {
+			find = true
+			break
+		}
+	}
+	if !find {
+		rf.INFO_LOG("don't find")
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		rf.mu.Unlock()
+		return
+	}
+
+	//
+	// restrict:
+	//
+	lastTerm := rf.logs[rf.logIndex].Term
+	lastIndex := rf.logs[rf.logIndex].Index
 	/*
-	if args.Term < rf.currentTerm {
-		// out of date
-		rf.INFO_LOG(fmt.Sprintf("recived out-of-date append entires, return false args term is %d leader is %d",
-			args.Term, args.LeaderID))
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		rf.mu.Unlock()
-		return
-	}*/
-	if args.PreLogIndex < rf.logs[rf.logIndex].Index {
-		rf.INFO_LOG(fmt.Sprintf("recived out-of-date append entires, return false args term is %d leader is %d",
-			args.Term, args.LeaderID))
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		rf.mu.Unlock()
-		return
-	}
-	rf.currentTerm = args.Term
-	if rf.leaderID != args.LeaderID {
-		rf.INFO_LOG(fmt.Sprintf("before leader changed old leader is %d", rf.leaderID))
-		rf.leaderID = args.LeaderID
-		rf.INFO_LOG(fmt.Sprintf("leader changed. new leader is %d", args.LeaderID))
-	}
+		if lastTerm > args.PreLogTerm || (lastTerm == args.Term && lastIndex > args.PreLogIndex) {
+			rf.INFO_LOG("break here")
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			rf.mu.Unlock()
+			return
+		}*/
+
+	rf.leaderID = args.LeaderID
 	rf.currentTerm = args.Term
 	rf.identity = Follower
 	rf.heartBeatsID++
-	if args.LeaderCommit > rf.commitIndex {
-		for i := rf.commitIndex + 1; i <= args.LeaderCommit && i < len(rf.logs); i++ {
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[i].Buffer,
-				CommandIndex: rf.logs[i].Index,
-			}
-			rf.INFO_LOG(fmt.Sprintf("follower send %d", msg.Command.(int)))
-			rf.applyChan <- msg
-			rf.commitIndex = i
-		}
-	}
+	rf.INFO_LOG("heartbeats recived")
 
 	reply.Term = rf.currentTerm
 
-	lastTerm := rf.logs[rf.logIndex].Term
-	lastIndex := rf.logs[rf.logIndex].Index
 	if lastTerm != args.PreLogTerm || lastIndex != args.PreLogIndex {
 		//
 		// check whether follower have
@@ -359,8 +355,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				lastTerm = rf.logs[rf.logIndex].Term
 				lastIndex = rf.logs[rf.logIndex].Index
 			}
+			rf.logs = rf.logs[:rf.logIndex+1]
 			reply.Success = false
-			rf.INFO_LOG(fmt.Sprintf("bad log now log index is %d", rf.logs[rf.logIndex].Index))
+			rf.INFO_LOG(fmt.Sprintf("bad log now log index is %d cmd is %d",
+				rf.logs[rf.logIndex].Index, rf.logs[rf.logIndex].Buffer))
 		} else {
 			//
 			// have something more need to append
@@ -368,16 +366,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = false
 			rf.INFO_LOG(fmt.Sprintf("append false lastTerm %d lastIndex %d argsPreTerm %d argsPreIndex %d",
 				lastTerm, lastIndex, args.PreLogTerm, args.PreLogIndex))
+			rf.mu.Unlock()
+			return
 		}
-	} else {
-		for _, entries := range args.Entries {
-			rf.logIndex++
-			rf.logs = append(rf.logs, entries)
+	}
+	for _, entries := range args.Entries {
+		rf.logIndex++
+		rf.logs = append(rf.logs, entries)
+	}
+	reply.Success = true
+	if args.LeaderCommit > rf.commitIndex {
+		for i := 0; i < len(rf.logs); i++ {
+			if rf.logs[i].Index > rf.commitIndex && rf.logs[i].Index <= args.LeaderCommit {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[i].Buffer,
+					CommandIndex: rf.logs[i].Index,
+				}
+				rf.INFO_LOG(fmt.Sprintf("follower send %d i is %d", msg.Command.(int), i))
+				rf.applyChan <- msg
+				rf.commitIndex = rf.logs[i].Index
+			}
 		}
-		reply.Success = true
 	}
 
 	rf.mu.Unlock()
+	return
 }
 
 func LeaderAppendLog(rf *Raft, cmd interface{}) {
@@ -420,6 +434,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	isLeader = rf.identity == Leader
 	LeaderAppendLog(rf, command)
+	if isLeader {
+		rf.INFO_LOG("Start")
+	}
 	index = rf.logs[rf.logIndex].Index
 	term = rf.logs[rf.logIndex].Term
 	return index, term, isLeader
@@ -428,7 +445,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 const (
 	HeartBeatsInterval         = 100
 	ElectTimeOutInterval       = 150
-	ElectTimeOutSleepTimeStart = 300
+	ElectTimeOutSleepTimeStart = 1000
 )
 
 func ElectionMain(rf *Raft) {
@@ -456,8 +473,8 @@ func ElectionMain(rf *Raft) {
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateID:  rf.me,
-			LastLogIndex: 0,
-			LastLogTerm:  0,
+			LastLogIndex: rf.logs[rf.logIndex].Index,
+			LastLogTerm:  rf.logs[rf.logIndex].Term,
 		}
 		for index, _ := range rf.peers {
 			if index == rf.me {
@@ -532,7 +549,7 @@ func LeaderMain(rf *Raft) {
 			if index == rf.me {
 				continue
 			}
-			go func(server int, ac chan bool) {
+			go func(server int, ac chan bool, logIndex int) {
 				rf.INFO_LOG(fmt.Sprintf("rf.nextIndex[%d] = %d", server, rf.nextIndex[server]))
 				//rf.nextIndex[server] = rf.logIndex
 				args := AppendEntriesArgs{
@@ -551,33 +568,31 @@ func LeaderMain(rf *Raft) {
 				}
 				ok := rf.sendAppendEntries(server, &args, &reply)
 				if ok && reply.Success {
-					//rf.INFO_LOG(fmt.Sprintf("accept %d", server))
 					ac <- true
-					rf.matchIndex[server] = rf.logIndex
-					rf.nextIndex[server] = rf.logIndex + 1
+					rf.matchIndex[server] = logIndex
+					rf.nextIndex[server] = logIndex + 1
 				} else {
-					rf.INFO_LOG(fmt.Sprintf("faild %d, nextIndex[server] = %d matchIndex[server] = %d",
-						server, rf.nextIndex[server], rf.matchIndex[server]))
 					ac <- false
 					if rf.nextIndex[server] > rf.matchIndex[server]+1 {
 						rf.nextIndex[server]--
 					}
 				}
-			}(index, ac)
+			}(index, ac, rf.logIndex)
 		}
 		nums := len(rf.peers)
 		index := rf.logIndex
 		finished := 1
 		accept := 1
-		ok:
+		flag := true
+	ok:
 		for {
 			select {
-			case ret := <- ac :
+			case ret := <-ac:
 				if ret {
 					accept++
 					if accept > nums/2 {
 						//rf.mu.Lock()
-						if rf.identity == Leader {
+						if rf.identity == Leader && flag {
 							if index >= 0 {
 								i := rf.commitIndex + 1
 								for ; i <= index; i++ {
@@ -593,7 +608,7 @@ func LeaderMain(rf *Raft) {
 							rf.commitIndex = index
 							//rf.INFO_LOG(fmt.Sprintf("commit %d", index))
 						}
-						break ok
+						flag = false
 					}
 				}
 				finished++
@@ -628,7 +643,7 @@ func RaftMain(rf *Raft) {
 		} else if rf.identity == Leader {
 			rf.mu.Unlock()
 			LeaderMain(rf)
-		} else if rf.identity == Closed{
+		} else if rf.identity == Closed {
 			return
 		} else {
 			rf.INFO_LOG("error here RaftMain")
