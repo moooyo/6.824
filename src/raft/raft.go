@@ -46,7 +46,7 @@ type ApplyMsg struct {
 }
 
 func __LOG(str string) {
-	fmt.Println("[INFO]" + str)
+	//fmt.Println("[INFO]" + str)
 }
 
 func (rf *Raft) INFO_LOG(str string) {
@@ -192,8 +192,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.INFO_LOG(fmt.Sprintf("recive vote request from %d", args.CandidateID))
 
-	if args.Term < rf.currentTerm  || (args.Term == rf.currentTerm &&
-		rf.voteFor != VoteForNull && rf.voteFor != args.CandidateID){
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm &&
+		rf.voteFor != VoteForNull && rf.voteFor != args.CandidateID) {
 		// vote false
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -290,6 +290,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
+func sendAppendEntriesWithoutRf(peer *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := peer.Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
@@ -325,7 +329,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	lastTerm := rf.logs[rf.commitIndex].Term
 	lastIndex := rf.logs[rf.commitIndex].Index
-	if lastTerm > args.PreLogTerm | | (lastTerm == args.Term && lastIndex > args.PreLogIndex) {
+	if (lastTerm > args.PreLogTerm) || (lastTerm == args.Term && lastIndex > args.PreLogIndex) {
 		rf.INFO_LOG(fmt.Sprintf("out-of-date heartbeats from %d args.preTerm %d args.preIndex %d lastTerm %d lastIndex %d",
 			args.LeaderID, args.PreLogTerm, args.PreLogIndex, lastTerm, lastIndex))
 		reply.Success = false
@@ -465,7 +469,6 @@ func ElectionMain(rf *Raft) {
 		if rf.leaderID != InvalidLeader || rf.identity != Follower || rf.voteFor != VoteForNull {
 			rf.identity = Follower
 			rf.voteFor = VoteForNull
-			//rf.leaderID = InvalidLeader
 			rf.mu.Unlock()
 			return
 		}
@@ -554,18 +557,15 @@ func LeaderMain(rf *Raft) {
 			if index == rf.me {
 				continue
 			}
-			go func(server int, ac chan bool, logIndex int) {
-				rf.INFO_LOG(fmt.Sprintf("rf.nextIndex[%d] = %d", server, rf.nextIndex[server]))
-				//rf.nextIndex[server] = rf.logIndex
-				args := AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderID:     rf.me,
-					PreLogIndex:  rf.logs[rf.nextIndex[server]-1].Index,
-					PreLogTerm:   rf.logs[rf.nextIndex[server]-1].Term,
-					Entries:      nil,
-					LeaderCommit: rf.commitIndex,
-				}
-				//fmt.Printf("next %d\n", rf.nextIndex[server])
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderID:     rf.me,
+				PreLogIndex:  rf.logs[rf.nextIndex[index]-1].Index,
+				PreLogTerm:   rf.logs[rf.nextIndex[index]-1].Term,
+				Entries:      nil,
+				LeaderCommit: rf.commitIndex,
+			}
+			go func(server int, ac chan bool, logIndex int, args AppendEntriesArgs) {
 				args.Entries = rf.logs[rf.nextIndex[server]:]
 				reply := AppendEntriesReply{
 					Term:    0,
@@ -574,32 +574,45 @@ func LeaderMain(rf *Raft) {
 				ok := rf.sendAppendEntries(server, &args, &reply)
 				if ok && reply.Success {
 					ac <- true
+					rf.mu.Lock()
+					if rf.identity == Closed {
+						rf.mu.Unlock()
+						return
+					}
 					rf.matchIndex[server] = logIndex
 					rf.nextIndex[server] = logIndex + 1
 				} else {
 					ac <- false
+					rf.mu.Lock()
+					if rf.identity == Closed {
+						rf.mu.Unlock()
+						return
+					}
 					if ok {
 						if rf.nextIndex[server] > rf.matchIndex[server]+1 {
 							rf.nextIndex[server]--
 						}
 					}
 				}
-			}(index, ac, rf.logIndex)
+				rf.mu.Unlock()
+			}(index, ac, rf.logIndex, args)
 		}
 		nums := len(rf.peers)
-		index := rf.logIndex
-		finished := 1
-		accept := 1
-		flag := true
-	ok:
-		for {
-			select {
-			case ret := <-ac:
+		idx := rf.logIndex
+		go func(nums, index int, ac chan bool) {
+			finished := 1
+			accept := 1
+			for {
+				ret := <-ac
 				if ret {
 					accept++
 					if accept > nums/2 {
-						//rf.mu.Lock()
-						if rf.identity == Leader && flag {
+						rf.mu.Lock()
+						if rf.identity == Closed {
+							rf.mu.Unlock()
+							return
+						}
+						if rf.identity == Leader {
 							if index >= 0 {
 								i := rf.commitIndex + 1
 								for ; i <= index; i++ {
@@ -613,16 +626,18 @@ func LeaderMain(rf *Raft) {
 								}
 							}
 							rf.commitIndex = index
+							rf.mu.Unlock()
+							return
 						}
-						flag = false
 					}
 				}
 				finished++
 				if finished == nums-1 {
-					break ok
+					return
 				}
 			}
-		}
+		}(nums, idx, ac)
+
 		rf.mu.Unlock()
 		time.Sleep(time.Millisecond * HeartBeatsInterval)
 	}
