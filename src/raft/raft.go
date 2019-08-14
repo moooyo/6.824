@@ -46,10 +46,13 @@ type ApplyMsg struct {
 }
 
 func __LOG(str string) {
-	fmt.Println("[INFO]" + str)
+	//fmt.Println("[INFO]" + str)
 }
 
 func (rf *Raft) INFO_LOG(str string) {
+	if !rf.status  {
+		return
+	}
 	tmp := fmt.Sprintf("[%d][%d][%d][%d][%d][%d]<%p> %s ",
 		rf.me, rf.currentTerm, rf.leaderID, rf.identity, rf.logIndex, rf.commitIndex, rf, str)
 	__LOG(tmp)
@@ -62,7 +65,6 @@ type LogEntry struct {
 }
 
 const (
-	Closed   = -1
 	Follower = iota
 	Candidate
 	Leader
@@ -93,6 +95,7 @@ type Raft struct {
 	commitIndex  int
 	lastApplied  int
 	leaderID     int
+	status		 bool
 	identity     int
 	heartBeatsID int
 	applyChan    chan ApplyMsg
@@ -184,13 +187,6 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-
-	if rf.identity == Closed {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		rf.mu.Lock()
-		return
-	}
 
 	rf.INFO_LOG(fmt.Sprintf("recive vote request from %d", args.CandidateID))
 
@@ -299,17 +295,10 @@ func sendAppendEntriesWithoutRf(peer *labrpc.ClientEnd, args *AppendEntriesArgs,
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	if rf.identity == Closed {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		rf.mu.Unlock()
-		return
-	}
 
 	//
 	// correct restrict
 	//
-
 	find := false
 	for i := rf.logIndex; i >= 0; i-- {
 		if args.PreLogTerm == rf.logs[i].Term && args.PreLogIndex == rf.logs[i].Index {
@@ -344,7 +333,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	rf.identity = Follower
 	rf.heartBeatsID++
-	rf.INFO_LOG("heartbeats")
+	rf.INFO_LOG(fmt.Sprintf("heartbeats from %d", args.LeaderID))
 
 	reply.Term = rf.currentTerm
 
@@ -405,23 +394,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	return
 }
 
-func LeaderAppendLog(rf *Raft, cmd interface{}) {
-	if rf.identity != Leader {
-		rf.mu.Unlock()
-		return
-	}
-	log := LogEntry{
-		Term:   rf.currentTerm,
-		Index:  rf.logs[rf.logIndex].Index + 1,
-		Buffer: cmd,
-	}
-	rf.logs = append(rf.logs, log)
-	rf.logIndex++
-	rf.mu.Unlock()
-	// start agreement in heartBeats
-
-	return
-}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -444,12 +416,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	isLeader = rf.identity == Leader
-	LeaderAppendLog(rf, command)
 	if isLeader {
-		rf.INFO_LOG(fmt.Sprintf("Start %d", command))
+		log := LogEntry{
+			Term:   rf.currentTerm,
+			Index:  rf.logs[rf.logIndex].Index + 1,
+			Buffer: command,
+		}
+		rf.logs = append(rf.logs, log)
+		rf.logIndex++
+		if isLeader {
+			rf.INFO_LOG(fmt.Sprintf("Start %d", command))
+		}
+		index = rf.logs[rf.logIndex].Index
+		term = rf.logs[rf.logIndex].Term
 	}
-	index = rf.logs[rf.logIndex].Index
-	term = rf.logs[rf.logIndex].Term
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
@@ -468,10 +449,6 @@ func ElectionMain(rf *Raft) {
 			rf.mu.Unlock()
 			return
 		}
-		if rf.identity == Closed {
-			rf.mu.Unlock()
-			return
-		}
 		if rf.leaderID != InvalidLeader || rf.identity != Follower || rf.voteFor != VoteForNull {
 			rf.identity = Follower
 			rf.voteFor = VoteForNull
@@ -484,6 +461,7 @@ func ElectionMain(rf *Raft) {
 		rf.voteFor = rf.me
 		rf.leaderID = rf.me
 		ac := make(chan bool, len(rf.peers))
+		done := make(chan struct{})
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateID:  rf.me,
@@ -529,34 +507,35 @@ func ElectionMain(rf *Raft) {
 						rf.nextIndex[index] = rf.logIndex + 1
 						rf.matchIndex[index] = 0
 					}
+					done <- struct{}{}
 					rf.mu.Unlock()
 					return
 				} else if reject > sz/2 {
 					rf.mu.Lock()
 					rf.INFO_LOG("elect false")
-					rf.mu.Lock()
 					rf.identity = Follower
 					rf.voteFor = VoteForNull
 					rf.leaderID = InvalidLeader
+					done <- struct{}{}
 					rf.mu.Unlock()
 					return
 				}
 				if accept + reject == sz-1 {
+					done <- struct{}{}
 					return
 				}
 			}
 		}(ac, sz)
 		rf.mu.Unlock()
+		<- done
+		rf.INFO_LOG("break elcet continue to new term")
 	}
 }
 
 func LeaderMain(rf *Raft) {
 	for {
 		rf.mu.Lock()
-		if rf.identity == Closed {
-			rf.mu.Unlock()
-			return
-		}
+
 		if rf.identity != Leader {
 			rf.INFO_LOG("server is no longer the leader")
 			rf.mu.Unlock()
@@ -585,19 +564,11 @@ func LeaderMain(rf *Raft) {
 				if ok && reply.Success {
 					ac <- true
 					rf.mu.Lock()
-					if rf.identity == Closed {
-						rf.mu.Unlock()
-						return
-					}
 					rf.matchIndex[server] = logIndex
 					rf.nextIndex[server] = logIndex + 1
 				} else {
 					ac <- false
 					rf.mu.Lock()
-					if rf.identity == Closed {
-						rf.mu.Unlock()
-						return
-					}
 					if ok {
 						if rf.nextIndex[server] > rf.matchIndex[server]+1 {
 							rf.nextIndex[server]--
@@ -618,10 +589,6 @@ func LeaderMain(rf *Raft) {
 					accept++
 					if accept > nums/2 {
 						rf.mu.Lock()
-						if rf.identity == Closed {
-							rf.mu.Unlock()
-							return
-						}
 						if rf.identity == Leader {
 							if index >= 0 {
 								i := rf.commitIndex + 1
@@ -656,7 +623,7 @@ func LeaderMain(rf *Raft) {
 func RaftMain(rf *Raft) {
 	for {
 		rf.mu.Lock()
-		//rf.INFO_LOG(fmt.Sprintf("identity is %d", rf.identity))
+		rf.INFO_LOG("RaftMain")
 		if rf.identity == Follower {
 			lastID := rf.heartBeatsID
 			rf.mu.Unlock()
@@ -674,9 +641,7 @@ func RaftMain(rf *Raft) {
 		} else if rf.identity == Leader {
 			rf.mu.Unlock()
 			LeaderMain(rf)
-		} else if rf.identity == Closed {
-			return
-		} else {
+		}  else {
 			rf.INFO_LOG("error here RaftMain")
 			time.Sleep(time.Second)
 			rf.mu.Unlock()
@@ -693,7 +658,7 @@ func RaftMain(rf *Raft) {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
-	rf.identity = Closed
+	rf.status = false
 	rf.mu.Unlock()
 }
 
@@ -725,6 +690,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.logs = make([]LogEntry, 1, 10)
 	rf.heartBeatsID = 0
+	rf.status = true
 	rf.applyChan = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
