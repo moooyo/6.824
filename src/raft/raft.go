@@ -46,11 +46,12 @@ type ApplyMsg struct {
 }
 
 func __LOG(str string) {
-	//fmt.Println("[INFO]" + str)
+	fmt.Println("[INFO]" + str)
 }
 
 func (rf *Raft) INFO_LOG(str string) {
-	tmp := fmt.Sprintf("[%d][%d][%d][%d]<%p> %s ", rf.me, rf.currentTerm, rf.leaderID, rf.identity, rf, str)
+	tmp := fmt.Sprintf("[%d][%d][%d][%d][%d][%d]<%p> %s ",
+		rf.me, rf.currentTerm, rf.leaderID, rf.identity, rf.logIndex, rf.commitIndex, rf, str)
 	__LOG(tmp)
 }
 
@@ -183,6 +184,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+
 	if rf.identity == Closed {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -220,12 +222,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// if is a new term. vote
 	if args.Term > rf.currentTerm {
-		//rf.INFO_LOG(fmt.Sprintf("vote for %d args.term %d", args.CandidateID, args.Term))
+		rf.INFO_LOG(fmt.Sprintf("vote for %d args.term %d", args.CandidateID, args.Term))
 		reply.Term = args.Term
 		reply.VoteGranted = true
 		rf.currentTerm = args.Term
 		rf.voteFor = args.CandidateID
-		rf.identity = Follower
+		//rf.identity = Follower
 		rf.mu.Unlock()
 		return
 	}
@@ -462,6 +464,10 @@ func ElectionMain(rf *Raft) {
 		time.Sleep(time.Millisecond *
 			time.Duration(ElectTimeOutSleepTimeStart+rand.Intn(ElectTimeOutInterval)))
 		rf.mu.Lock()
+		if rf.identity == Leader {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.identity == Closed {
 			rf.mu.Unlock()
 			return
@@ -502,40 +508,44 @@ func ElectionMain(rf *Raft) {
 			}(index, rf.currentTerm, ac)
 		}
 		sz := len(rf.peers)
-		rf.INFO_LOG("wait group")
-		accept := 1
-		count := 0
-	slc:
-		for {
-			select {
-			case ok := <-ac:
-				rf.INFO_LOG(fmt.Sprintf("recive %t", ok))
+		go func(ac chan bool, sz int) {
+			accept := 1
+			reject := 0
+			for {
+				ok := <-ac
 				if ok {
 					accept++
-					if accept > sz/2 {
-						rf.INFO_LOG("win")
-						rf.leaderID = rf.me
-						rf.identity = Leader
-						rf.nextIndex = make([]int, len(rf.peers))
-						rf.matchIndex = make([]int, len(rf.peers))
-						for index, _ := range rf.peers {
-							rf.nextIndex[index] = rf.logIndex + 1
-							rf.matchIndex[index] = 0
-						}
-						rf.mu.Unlock()
-						return
-					}
+				} else {
+					reject++
 				}
-				count++
-				if count == sz-1 {
-					break slc
+				if accept > sz/2 {
+					rf.mu.Lock()
+					rf.INFO_LOG("elect win")
+					rf.leaderID = rf.me
+					rf.identity = Leader
+					rf.nextIndex = make([]int, len(rf.peers))
+					rf.matchIndex = make([]int, len(rf.peers))
+					for index, _ := range rf.peers {
+						rf.nextIndex[index] = rf.logIndex + 1
+						rf.matchIndex[index] = 0
+					}
+					rf.mu.Unlock()
+					return
+				} else if reject > sz/2 {
+					rf.mu.Lock()
+					rf.INFO_LOG("elect false")
+					rf.mu.Lock()
+					rf.identity = Follower
+					rf.voteFor = VoteForNull
+					rf.leaderID = InvalidLeader
+					rf.mu.Unlock()
+					return
+				}
+				if accept + reject == sz-1 {
+					return
 				}
 			}
-		}
-		rf.INFO_LOG("elect false")
-		rf.identity = Follower
-		rf.voteFor = VoteForNull
-		rf.leaderID = InvalidLeader
+		}(ac, sz)
 		rf.mu.Unlock()
 	}
 }
