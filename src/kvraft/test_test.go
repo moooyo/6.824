@@ -1,6 +1,8 @@
 package raftkv
 
-import "linearizability"
+import (
+	"linearizability"
+)
 
 import "testing"
 import "strconv"
@@ -291,6 +293,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 	}
 	if crash {
 		// peers re-start, and thus persistence must work.
+		Debug = 1
 		title = title + "restarts, "
 	}
 	if partitions {
