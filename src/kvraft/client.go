@@ -1,13 +1,38 @@
 package raftkv
 
-import "labrpc"
+import (
+	"fmt"
+	"labrpc"
+	"raft"
+	"sync"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
 
+func (ck *Clerk) DPrintf (format string, a ...interface{})  {
+	prefix := fmt.Sprintf("[C][%d][%d][%d]", ck.ClientID, ck.LeaderID, ck.Sequence)
+	tmp := fmt.Sprintf(format, a...)
+	DPrintf("%s %s",prefix, tmp)
+}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	Sequence		int 			// seq
+	ClientID		int64			// Client ID
+	LeaderID		int				// Leader ID
+
+	// mu
+	mutex 			sync.Mutex
+}
+
+func (ck *Clerk) Lock ()  {
+	ck.mutex.Lock()
+}
+
+func (ck *Clerk) UnLock () {
+	ck.mutex.Unlock()
 }
 
 func nrand() int64 {
@@ -21,8 +46,15 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.ClientID = nrand()
+	ck.Sequence = 0
+	ck.LeaderID = raft.InvalidLeader
+	ck.servers = servers
+
 	return ck
 }
+
+const RetryInterval = time.Duration(125 * time.Millisecond)
 
 //
 // fetch the current value for a key.
@@ -37,9 +69,30 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.Lock()
+	server := ck.LeaderID
+	ck.UnLock()
+	if server == raft.InvalidLeader {
+		server = 0
+	}
+	args := GetArgs{Key:key}
+	for {
+		reply := GetReply{
+			IsLeader: false,
+			Error:       "",
+			Value:       "",
+		}
+		_ = ck.servers[server].Call("KVServer.Get", &args, &reply)
+		if reply.IsLeader {
+			ck.Lock()
+			ck.LeaderID = server
+			ck.UnLock()
+			return reply.Value
+		}
 
-	// You will have to modify this function.
-	return ""
+		server = (server + 1) % len(ck.servers)
+		time.Sleep(RetryInterval)
+	}
 }
 
 //
@@ -54,6 +107,39 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+
+	ck.Lock()
+	server := ck.LeaderID
+	args.ClientID = ck.ClientID
+	ck.Sequence++
+	args.Seq = ck.Sequence
+	ck.UnLock()
+
+	if server == raft.InvalidLeader {
+		server = 0
+	}
+
+	for {
+		reply := PutAppendReply{
+			IsLeader: false,
+			Error:    "",
+		}
+		_ = ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
+		if  reply.IsLeader {
+			ck.Lock()
+			ck.LeaderID = server
+			ck.UnLock()
+			ck.DPrintf("append <%s,%s> success", args.Key, args.Value)
+			return
+		}
+		server = (server + 1) % len(ck.servers)
+		time.Sleep(RetryInterval)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

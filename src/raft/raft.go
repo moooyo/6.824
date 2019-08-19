@@ -48,9 +48,11 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 }
-
+var RaftDebug = false
 func __LOG(str string) {
-	fmt.Println("[INFO]" + str)
+	if RaftDebug == true {
+		fmt.Println("[INFO]" + str)
+	}
 }
 
 func (rf *Raft) INFO_LOG(str string) {
@@ -147,9 +149,8 @@ func (rf *Raft) persist() {
 	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.voteFor) != nil ||
 		e.Encode(rf.logIndex) != nil || e.Encode(rf.logs) != nil ||
 		e.Encode(rf.commitIndex) != nil || e.Encode(rf.commitLogIndex) != nil {
-		fmt.Printf("err to save")
+		log.Fatal("err")
 	}
-	rf.INFO_LOG(fmt.Sprintf("save %d %d %d %d %v", rf.currentTerm, rf.voteFor, rf.logIndex, rf.commitIndex, rf.logs))
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -194,6 +195,16 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logIndex = logIndex
 		rf.logs = logs
 		rf.commitIndex = commitIndex
+		for _, entry := range rf.logs {
+			if entry.Index != HeartBeatsIndex {
+				args := ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Buffer,
+					CommandIndex: entry.Index,
+				}
+				rf.applyChan <- args
+			}
+		}
 		rf.INFO_LOG(fmt.Sprintf("reload %d %d %d %d %v", rf.currentTerm, rf.voteFor, rf.logIndex, rf.commitIndex, rf.logs))
 		rf.mu.Unlock()
 	}
@@ -420,7 +431,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						CommandIndex: rf.logs[i].Index,
 					}
 					if msg.CommandValid {
-						rf.INFO_LOG(fmt.Sprintf("follower send %d i is %d", msg.Command.(int), i))
+						rf.INFO_LOG(fmt.Sprintf("follower send %d i is %v", msg.Command, i))
 						rf.applyChan <- msg
 					}
 					rf.commitLogIndex = rf.logs[i].Index
@@ -642,7 +653,6 @@ func (rf *Raft) sendLogEntries (server int, ac chan bool, logIndex int, lastInde
 		rf.mu.Unlock()
 		return
 	}
-	rf.INFO_LOG(fmt.Sprintf("Success %t logIndex is %d", reply.Success, logIndex))
 	if reply.Success {
 		if logIndex > rf.matchIndex[server] {
 			rf.matchIndex[server] = logIndex
@@ -650,7 +660,6 @@ func (rf *Raft) sendLogEntries (server int, ac chan bool, logIndex int, lastInde
 		}
 	} else if ok && lastIndex == rf.nextIndex[server] {
 		i := lastIndex - 1
-		rf.INFO_LOG(fmt.Sprintf("before is %d", lastIndex))
 		for ; i > 0; i-- {
 			if rf.logs[i-1].Term != rf.logs[lastIndex - 1].Term {
 				i++
@@ -665,7 +674,6 @@ func (rf *Raft) sendLogEntries (server int, ac chan bool, logIndex int, lastInde
 		} else if rf.nextIndex[server] > rf.matchIndex[server] + 1 {
 			rf.nextIndex[server] = rf.nextIndex[server] - 1
 		}
-		rf.INFO_LOG(fmt.Sprintf("after is %d", rf.nextIndex[server]))
 	}
 	rf.mu.Unlock()
 }
@@ -694,7 +702,6 @@ func HeartBeats(rf *Raft) {
 			if args.LeaderCommit > rf.commitLogIndex {
 				args.LeaderCommit = rf.commitLogIndex
 			}
-			rf.INFO_LOG(fmt.Sprintf("rf.nextIndex[index] %d rf.matchIndex[index] %d server %d", rf.nextIndex[index], rf.matchIndex[index], index))
 			for _, entry := range rf.logs[rf.nextIndex[index]:] {
 				args.Entries = append(args.Entries, entry)
 			}
