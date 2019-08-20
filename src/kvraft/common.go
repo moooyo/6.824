@@ -21,7 +21,7 @@ type PutAppendArgs struct {
 	ClientID	int64
 }
 
-var Debug = 0
+var Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -45,6 +45,12 @@ type GetReply struct {
 	Error        	Err
 	Value       	string
 }
+
+type SnapShotArgs struct {
+	State 		[]byte
+	Snapshot 	[]byte
+}
+
 
 func (args *GetArgs) copy() (ret GetArgs){
 	ret = GetArgs{args.Key}

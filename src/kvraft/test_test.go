@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"fmt"
 	"linearizability"
 )
 
@@ -615,6 +616,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 	{
 		ck1 := cfg.makeClient([]int{0, 1})
 		for i := 0; i < 50; i++ {
+			fmt.Printf("-----put <%d,%d>-----\n",i,i)
 			Put(cfg, ck1, strconv.Itoa(i), strconv.Itoa(i))
 		}
 		time.Sleep(electionTimeout)

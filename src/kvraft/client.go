@@ -50,7 +50,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.Sequence = 0
 	ck.LeaderID = raft.InvalidLeader
 	ck.servers = servers
-
+	ck.DPrintf("Make")
 	return ck
 }
 

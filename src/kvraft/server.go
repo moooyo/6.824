@@ -1,9 +1,11 @@
 package raftkv
 
 import (
+	"bytes"
 	"fmt"
 	"labgob"
 	"labrpc"
+	"log"
 	"raft"
 	"sync"
 	"time"
@@ -25,6 +27,13 @@ const (
 const (
 	ErrWrongLeader = "Wrong Leader"
 )
+
+//
+// snapshot rate.
+// if state size * rate > max size
+// server need create a snapshot
+//
+const SnapshotRate = 0.9
 
 type NotifyArgs struct {
 	Error Err
@@ -121,6 +130,42 @@ func (kv *KVServer) ReplyNotify(index int, reply NotifyArgs) {
 		channel <- reply
 	}
 }
+func (kv *KVServer) CreateSnapShot(idx int) {
+	if kv.persister.RaftStateSize() >= int(SnapshotRate * float64(kv.maxraftstate)) {
+		// need create snapshot
+		buffer := new(bytes.Buffer)
+		enc := labgob.NewEncoder(buffer)
+		if enc.Encode(kv.data) != nil || enc.Encode(kv.ack) != nil {
+			log.Fatal("snapshot err")
+		}
+		data := buffer.Bytes()
+		kv.rf.CreateSnapShot(idx, data)
+	}
+}
+
+func (kv *KVServer) InstallSnapShot(msg raft.ApplyMsg){
+	kv.Lock()
+	kv.RecoveryFromSnapShot()
+	kv.UnLock()
+}
+
+func (kv *KVServer) RecoveryFromSnapShot(){
+	snapshot := kv.persister.ReadSnapshot()
+	r := bytes.NewBuffer(snapshot)
+	dec := labgob.NewDecoder(r)
+	kv.data = nil
+	kv.ack = nil
+	var data map[string]string
+	var ack map[int64]int
+	if err := dec.Decode(&data); err != nil {
+		data = make(map[string]string)
+	}
+	if err := dec.Decode(&ack); err != nil {
+		ack = make(map[int64]int)
+	}
+	kv.data = data
+	kv.ack = ack
+}
 
 func (kv *KVServer) Do(msg raft.ApplyMsg) {
 	args := NotifyArgs{
@@ -131,6 +176,7 @@ func (kv *KVServer) Do(msg raft.ApplyMsg) {
 	index := msg.CommandIndex
 	if tmp, ok := msg.Command.(GetArgs); ok {
 		args.Value = kv.data[tmp.Key]
+		kv.DPrintf("Get %s = %s", tmp.Key, args.Value)
 	} else if tmp, ok := msg.Command.(PutAppendArgs); ok {
 		kv.DPrintf("%s = %s", tmp.Key, tmp.Value)
 		client := tmp.ClientID
@@ -151,10 +197,11 @@ func (kv *KVServer) Do(msg raft.ApplyMsg) {
 			kv.DPrintf("accept but not ack")
 			args.Error = ErrWrongLeader
 		} else {
-			kv.DPrintf("resend ack msg ack %d seq %d", kv.ack[client], tmp.Seq)
+			kv.DPrintf("resend ack msg ack %d seq %d client %d ", kv.ack[client], tmp.Seq, tmp.ClientID)
 		}
 	}
 	kv.ReplyNotify(index, args)
+	kv.CreateSnapShot(index)
 	kv.UnLock()
 }
 
@@ -166,6 +213,9 @@ func (kv *KVServer) Run() {
 		case msg := <- kv.applyCh:
 			if msg.CommandValid {
 				kv.Do(msg)
+			} else if msg.CommandType == raft.InstallSnapshotType {
+				kv.DPrintf("install")
+				kv.InstallSnapShot(msg)
 			}
 		}
 	}
@@ -202,16 +252,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg, 1024)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 
-	kv.ack = make(map[int64]int)
 	kv.shutdown = make(chan struct{}, 1)
 	kv.notify = make(map[int]chan NotifyArgs)
-	kv.data = make(map[string]string)
+
+	kv.RecoveryFromSnapShot()
 
 	go kv.Run()
 
